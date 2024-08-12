@@ -50,6 +50,9 @@ def order_to_transaction(
     fee_account=default_fee_account,
     gain_account=default_gain_account,
 ) -> Transaction:
+    is_us_option = order.symbol.endswith(".US") and (
+        order.stock_name.endswith(" Call") or order.stock_name.endswith(" Put")
+    )
     return Transaction(
         meta={},
         date=order.submitted_at,
@@ -70,7 +73,10 @@ def order_to_transaction(
                         order.symbol,
                     ),
                     cost=None if order.side != OrderSide.Sell else EMPTY_COST_SPEC,
-                    price=Amount(history.price, order.currency),
+                    price=Amount(
+                        history.price * Decimal(100 if is_us_option else 1),
+                        order.currency,
+                    ),
                     flag=None,
                     meta=None,
                 )
@@ -93,12 +99,13 @@ def order_to_transaction(
                 Posting(
                     account=cash_account(order),
                     units=Amount(
-                        (Decimal(-1) if order.side == OrderSide.Buy else Decimal(1))
-                        * sum(
+                        sum(
                             history.price * Decimal(history.quantity)
                             for history in order.history
                             if history.status == OrderStatus.Filled
                         )
+                        * Decimal(-1 if order.side == OrderSide.Buy else 1)
+                        * Decimal(100 if is_us_option else 1)
                         - sum(
                             fee.amount
                             for item in order.charge_detail.items
@@ -147,7 +154,7 @@ if __name__ == "__main__":
         for order in ctx.history_orders(start_at=start, end_at=end)
         if order.status == OrderStatus.Filled
     ]
-    orders.reverse()
+    orders.sort(key=lambda order: order.updated_at)
     for order in orders:
         order_detail = ctx.order_detail(order.order_id)
         print(order_detail, file=stderr)
