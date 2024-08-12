@@ -1,0 +1,2 @@
+beancount==3.0.0
+longport==1.0.29
