@@ -2,6 +2,7 @@ from beancount.core.data import Transaction, Posting, Amount, CostSpec
 from longport.openapi import (
     OrderDetail,
     OrderStatus,
+    OrderHistoryDetail,
     ChargeCategoryCode,
     OrderSide,
     OrderChargeFee,
@@ -24,21 +25,77 @@ def default_transaction_narration(order: OrderDetail) -> str:
 
 
 def default_stock_account(order: OrderDetail) -> str:
-    return "Assets:Invest:" + order.symbol
+    if order.symbol.endswith(".HK"):
+        return "Assets:Invest:LongBridge:HK" + order.symbol[:-3]
+    if is_us_option(order):
+        return "Assets:Invest:LongBridge:Option:" + order.symbol[:-3]
+    if order.symbol.endswith(".US"):
+        return "Assets:Invest:LongBridge:" + order.symbol[:-3]
+    return "Assets:Invest:LongBridge:" + order.symbol
+
+
+def default_stock_currency(order: OrderDetail) -> str:
+    if order.symbol.endswith(".HK"):
+        return "HK" + order.symbol[:-3]
+    if order.symbol.endswith(".US"):
+        return order.symbol[:-3]
+    return order.symbol
 
 
 def default_cash_account(order: OrderDetail) -> str:
-    return "Assets:Invest:Cash"
+    return "Assets:Invest:LongBridge:Cash"
 
 
 def default_fee_account(
     order: OrderDetail, item: OrderChargeItem, fee: OrderChargeFee
 ) -> str:
-    return f"Expenses:Commission:{'Broker:' if item.code == ChargeCategoryCode.Broker else 'Third:' if item.code == ChargeCategoryCode.Third else ''}{fee.code}"
+    return f"Expenses:Commission:LongBridge:{'Broker:' if item.code == ChargeCategoryCode.Broker else 'Third:' if item.code == ChargeCategoryCode.Third else ''}{fee.code}"
 
 
 def default_gain_account(order: OrderDetail) -> str:
     return "Income:CapitalGains"
+
+
+def is_us_option(order: OrderDetail) -> bool:
+    return order.symbol.endswith(".US") and (
+        order.stock_name.endswith(" Call") or order.stock_name.endswith(" Put")
+    )
+
+
+def order_history_to_posting(
+    order: OrderDetail,
+    history: OrderHistoryDetail,
+    *,
+    stock_account=default_stock_account,
+    stock_currency=default_stock_currency,
+) -> Posting:
+    price_factor = Decimal(100) if is_us_option(order) else Decimal(1)
+    if order.side == OrderSide.Sell:
+        return Posting(
+            account=stock_account(order),
+            units=Amount(Decimal(-history.quantity), stock_currency(order)),
+            cost=EMPTY_COST_SPEC,
+            price=Amount(history.price*price_factor, order.currency),
+            flag=None,
+            meta=None,
+        )
+    if order.side == OrderSide.Buy:
+        return Posting(
+            account=stock_account(order),
+            units=Amount(Decimal(history.quantity), stock_currency(order)),
+            cost=CostSpec(
+                number_per=history.price*price_factor,
+                number_total=None,
+                currency=order.currency,
+                date=None,
+                label=None,
+                merge=None,
+            ),
+            price=None,
+            flag=None,
+            meta=None,
+        )
+    raise ValueError("Unsupported order side: {order.side}")
 
 
 def order_to_transaction(
@@ -46,16 +103,14 @@ def order_to_transaction(
     *,
     transaction_narration=default_transaction_narration,
     stock_account=default_stock_account,
+    stock_currency=default_stock_currency,
     cash_account=default_cash_account,
     fee_account=default_fee_account,
     gain_account=default_gain_account,
 ) -> Transaction:
-    is_us_option = order.symbol.endswith(".US") and (
-        order.stock_name.endswith(" Call") or order.stock_name.endswith(" Put")
-    )
     return Transaction(
         meta={},
-        date=order.submitted_at,
+        date=order.submitted_at.date(),
         flag="*",
         payee=None,
         narration=transaction_narration(order),
@@ -63,25 +118,12 @@ def order_to_transaction(
         links=frozenset(),
         postings=(
             [
-                Posting(
-                    account=stock_account(order),
-                    units=Amount(
-                        Decimal(
-                            history.quantity
-                            * (1 if order.side == OrderSide.Buy else -1)
-                        ),
-                        order.symbol,
-                    ),
-                    cost=None if order.side != OrderSide.Sell else EMPTY_COST_SPEC,
-                    price=Amount(
-                        history.price * Decimal(100 if is_us_option else 1),
-                        order.currency,
-                    ),
-                    flag=None,
-                    meta=None,
-                )
-                for history in order.history
-                if history.status == OrderStatus.Filled
+                order_history_to_posting(
+                    order, history,
+                    stock_account=stock_account,
+                    stock_currency=stock_currency,
+                ) for history in order.history
+                if history.status == OrderStatus.Filled or history.status == OrderStatus.PartialFilled
             ]
             + [
                 Posting(
@@ -100,12 +142,11 @@ def order_to_transaction(
                     account=cash_account(order),
                     units=Amount(
                         sum(
-                            history.price * Decimal(history.quantity)
-                            for history in order.history
-                            if history.status == OrderStatus.Filled
+                            history.price * Decimal(history.quantity) for history in order.history
+                            if history.status == OrderStatus.Filled or history.status == OrderStatus.PartialFilled
                         )
                         * Decimal(-1 if order.side == OrderSide.Buy else 1)
-                        * Decimal(100 if is_us_option else 1)
+                        * Decimal(100 if is_us_option(order) else 1)
                         - sum(
                             fee.amount
                             for item in order.charge_detail.items
