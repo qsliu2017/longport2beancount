@@ -180,15 +180,15 @@ def order_to_transaction(
 
 # example: fetch and convert orders of July 2024
 if __name__ == "__main__":
-    start = datetime(2024, 7, 1)
-    end = datetime(2024, 7, 31)
-
     from beancount.core.data import Open, Close, Booking
     from beancount.parser.printer import print_entries
     from datetime import datetime, date
     from longport.openapi import Config, TradeContext, OrderStatus
     from sys import stderr
     from time import sleep
+
+    start = datetime(2024, 11, 1)
+    end = datetime(2024, 11, 30)
 
     ctx = TradeContext(Config.from_env())
     orders = [
@@ -214,7 +214,7 @@ if __name__ == "__main__":
         txns.append(order_to_transaction(order_detail))
         sleep(1)  # avoid rate limit
 
-    with open(f"longbridge-2024-07.beancount", "w") as f:
+    with open(f"longbridge-2024-11.beancount", "w") as f:
         f.write(f"; {start.date()}-{end.date()}\n\n")
         print_entries([
             Open(
