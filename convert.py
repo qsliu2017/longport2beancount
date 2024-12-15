@@ -178,26 +178,59 @@ def order_to_transaction(
     )
 
 
-# example: fetch and convert orders of last 3 months
+# example: fetch and convert orders of July 2024
 if __name__ == "__main__":
-    from longport.openapi import Config, TradeContext
-    from beancount.parser.printer import print_entry
+    start = datetime(2024, 7, 1)
+    end = datetime(2024, 7, 31)
+
+    from beancount.core.data import Open, Close, Booking
+    from beancount.parser.printer import print_entries
+    from datetime import datetime, date
+    from longport.openapi import Config, TradeContext, OrderStatus
     from sys import stderr
-    from datetime import datetime
     from time import sleep
 
-    config = Config.from_env()
-    ctx = TradeContext(config)
-    end = datetime.now()
-    start = end.replace(month=end.month - 3)
+    ctx = TradeContext(Config.from_env())
     orders = [
         order
         for order in ctx.history_orders(start_at=start, end_at=end)
         if order.status == OrderStatus.Filled
     ]
     orders.sort(key=lambda order: order.updated_at)
+    txns = []
+    options: dict[str, tuple[date, date]] = {}  # option -> (first, last)
     for order in orders:
         order_detail = ctx.order_detail(order.order_id)
         print(order_detail, file=stderr)
-        print_entry(order_to_transaction(order_detail))
+        if is_us_option(order_detail):
+            option = order_detail.symbol[:-3]
+            options[option] = (
+                order_detail.updated_at.date(),
+                order_detail.updated_at.date()
+            ) if option not in options else (
+                min(options[option][0], order_detail.updated_at.date()),
+                max(options[option][1], order_detail.updated_at.date()),
+            )
+        txns.append(order_to_transaction(order_detail))
         sleep(1)  # avoid rate limit
+
+    with open(f"longbridge-2024-07.beancount", "w") as f:
+        f.write(f"; {start.date()}-{end.date()}\n\n")
+        print_entries([
+            Open(
+                meta={},
+                date=first,
+                account="Assets:Invest:LongBridge:Option:" + option,
+                currencies=[option],
+                booking=Booking.FIFO,
+            ) for option, (first, last) in options.items()
+        ], file=f)
+        print_entries(txns, file=f)
+        f.write("\n")
+        print_entries([
+            Close(
+                meta={},
+                date=last,
+                account="Assets:Invest:LongBridge:Option:" + option,
+            ) for option, (first, last) in options.items()
+        ], file=f)
